@@ -1,15 +1,24 @@
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
+#include "ppport.h"
 
+/* Not yet in ppport.h */
+#ifndef CvISXSUB
+#  define CvISXSUB(cv)  (CvXSUB(cv) ? TRUE : FALSE)
+#endif
 
 #ifdef _MSC_VER 
-#   include <excpt.h>
-#   define try __try
-#   define catch __except
-#   define EXCEPTION EXCEPTION_EXECUTE_HANDLER
+/* "structured exception" handling is a Microsoft extension to C and C++.
+   It's *not* C++ exception handling - C++ exception handling can't capture
+   SEGVs and suchlike, whereas this can. There's no known analagous
+    functionality on other platforms.  */
+#  include <excpt.h>
+#  define TRY_TO_CATCH_SEGV __try
+#  define CAUGHT_EXCEPTION __except(EXCEPTION EXCEPTION_EXECUTE_HANDLER)
 #else
-#   define EXCEPTION ...
+#  define TRY_TO_CATCH_SEGV if(1)
+#  define CAUGHT_EXCEPTION else
 #endif
 
 #ifdef __GNUC__
@@ -26,58 +35,115 @@ static int dangle_whine = 0;
 #define dbg_printf(x)
 #endif
 
-#define TAG //printf( "# %s(%d)\n", __FILE__, __LINE__ )
+#define TAG /* printf( "# %s(%d)\n", __FILE__, __LINE__ ) */
 #define carp puts
 
-#define ALIGN_BITS  ( sizeof(void*) >> 1 )
-#define BIT_BITS    3
-#define BYTE_BITS   14
-#define SLOT_BITS   ( sizeof( void*) * 8 ) - ( ALIGN_BITS + BIT_BITS + BYTE_BITS )
-#define BYTES_PER_SLOT  1 << BYTE_BITS
-#define TRACKING_SLOTS  8192 // max. 8192 for 4GB/32-bit machine
+/* The idea is to have a tree structure to store 1 bit per possible pointer
+   address. The lowest 16 bits are stored in a block of 8092 bytes.
+   The blocks are in a 256-way tree, indexed by the reset of the pointer.
+   This can cope with 32 and 64 bit pointers, and any address space layout,
+   without excessive memory needs. The assumption is that your CPU cache
+   works :-) (And that we're not going to bust it)  */
 
-typedef char* TRACKING[ TRACKING_SLOTS ];
+#define ALIGN_BITS  ( sizeof(void*) >> 1 )
+#define BYTE_BITS    3
+#define LEAF_BITS   (16 - BYTE_BITS)
+#define LEAF_MASK   0x1FFF
+
+typedef void * TRACKING[256];
 
 /* 
     Checks to see if thing is in the bitstring. 
     Returns true or false, and
     notes thing in the segmented bitstring.
  */
-IV check_new( TRACKING *tv, void *p ) {
-    unsigned long slot =  (unsigned long)p >> (SLOT_BITS + BIT_BITS + ALIGN_BITS);
-    unsigned int  byte = ((unsigned long)p >> (ALIGN_BITS + BIT_BITS)) & 0x00003fffU;
-    unsigned int  bit  = ((unsigned long)p >> ALIGN_BITS) & 0x00000007U;
-    unsigned int  nop  =  (unsigned long)p & 0x3U;
-    
-    if (NULL == p || NULL == tv) return FALSE;
-    try { 
-        char c = *(char *)p;
+static bool
+check_new(TRACKING *tv, const void *const p) {
+    unsigned int bits = 8 * sizeof(void*);
+    const size_t raw_p = PTR2nat(p);
+    /* This effectively rotates the value right by the number of low always-0
+       bits in an aligned pointer. The assmption is that most (if not all)
+       pointers are aligned, and these will be in the same chain of nodes
+       (and hence hot in the cache) but we can still deal with any unaligned
+       pointers.  */
+    const size_t cooked_p
+	= (raw_p >> ALIGN_BITS) | (raw_p << (bits - BYTE_BITS));
+    const U8 this_bit = 1 << (cooked_p & 0x7);
+    U8 **leaf_p;
+    U8 *leaf;
+    unsigned int i;
+    void **tv_p = (void **) tv;
+
+    assert(tv);
+    if (NULL == p) return FALSE;
+    TRY_TO_CATCH_SEGV { 
+        const char c = *(const char *)p;
     }
-    catch ( EXCEPTION ) {
+    CAUGHT_EXCEPTION {
         if( dangle_whine ) 
             warn( "Devel::Size: Encountered invalid pointer: %p\n", p );
         return FALSE;
     }
-    dbg_printf((
-        "address: %p slot: %p byte: %4x bit: %4x nop:%x\n",
-        p, slot, byte, bit, nop
-    ));
     TAG;    
-    if( slot >= TRACKING_SLOTS ) {
-        die( "Devel::Size: Please rebuild D::S with TRACKING_SLOTS > %u\n", slot );
-    }
+
+    bits -= 8;
+    /* bits now 24 (32 bit pointers) or 56 (64 bit pointers) */
+
+    /* First level is always present.  */
+    do {
+	i = (unsigned int)((cooked_p >> bits) & 0xFF);
+	if (!tv_p[i])
+	    Newxz(tv_p[i], 256, void *);
+	tv_p = (void **)(tv_p[i]);
+	bits -= 8;
+    } while (bits > LEAF_BITS + BYTE_BITS);
+    /* bits now 16 always */
+    assert(bits == 16);
+    leaf_p = (U8 **)tv_p;
+    i = (unsigned int)((cooked_p >> bits) & 0xFF);
+    if (!leaf_p[i])
+	Newxz(leaf_p[i], 1 << LEAF_BITS, U8);
+    leaf = leaf_p[i];
+
     TAG;    
-    if( (*tv)[ slot ] == NULL ) {
-        Newz( 0xfc0ff, (*tv)[ slot ], BYTES_PER_SLOT, char );
-    }
-    TAG;    
-    if( (*tv)[ slot ][ byte ] & ( 1 << bit ) ) {
-        return FALSE;
-    }
-    TAG;    
-    (*tv)[ slot ][ byte ] |= ( 1 << bit );
-    TAG;    
+
+    i = (unsigned int)((cooked_p >> BYTE_BITS) & LEAF_MASK);
+
+    if(leaf[i] & this_bit)
+	return FALSE;
+
+    leaf[i] |= this_bit;
     return TRUE;
+}
+
+static void
+free_tracking_at(void **tv, int level)
+{
+    int i = 255;
+
+    if (--level) {
+	/* Nodes */
+	do {
+	    if (tv[i]) {
+		free_tracking_at(tv[i], level);
+		Safefree(tv[i]);
+	    }
+	} while (i--);
+    } else {
+	/* Leaves */
+	do {
+	    if (tv[i])
+		Safefree(tv[i]);
+	} while (i--);
+    }
+}
+
+static void
+free_tracking(TRACKING *tv)
+{
+    const int top_level = (sizeof(void *) * 8 - LEAF_BITS - BYTE_BITS) / 8;
+    free_tracking_at((void **)tv, top_level);
+    Safefree(tv);
 }
 
 UV thing_size(const SV *const, TRACKING *);
@@ -101,7 +167,7 @@ cc_opclass(const OP * const o)
 {
     if (!o)
     return OPc_NULL;
-    try {
+    TRY_TO_CATCH_SEGV {
         if (o->op_type == 0)
         return (o->op_flags & OPf_KIDS) ? OPc_UNOP : OPc_BASEOP;
 
@@ -205,7 +271,7 @@ cc_opclass(const OP * const o)
         warn("Devel::Size: Can't determine class of operator %s, assuming BASEOP\n",
          PL_op_name[o->op_type]);
     }
-    catch( EXCEPTION ) { }
+    CAUGHT_EXCEPTION { }
     return OPc_BASEOP;
 }
 
@@ -235,17 +301,17 @@ IV magic_size(const SV * const thing, TRACKING *tv) {
   while (magic_pointer && check_new(tv, magic_pointer)) {
     total_size += sizeof(MAGIC);
 
-    try {
+    TRY_TO_CATCH_SEGV {
         /* Have we seen the magic vtable? */
         if (magic_pointer->mg_virtual &&
         check_new(tv, magic_pointer->mg_virtual)) {
           total_size += sizeof(MGVTBL);
         }
 
-        /* Get the next in the chain */ // ?try
+        /* Get the next in the chain */
         magic_pointer = magic_pointer->mg_moremagic;
     }
-    catch( EXCEPTION ) { 
+    CAUGHT_EXCEPTION { 
         if( dangle_whine ) 
             warn( "Devel::Size: Encountered bad magic at: %p\n", magic_pointer );
     }
@@ -276,7 +342,7 @@ UV regex_size(const REGEXP * const baseregex, TRACKING *tv) {
 
 UV op_size(const OP * const baseop, TRACKING *tv) {
   UV total_size = 0;
-  try {
+  TRY_TO_CATCH_SEGV {
       TAG;
       if (check_new(tv, baseop->op_next)) {
            total_size += op_size(baseop->op_next, tv);
@@ -422,7 +488,7 @@ UV op_size(const OP * const baseop, TRACKING *tv) {
         TAG;break;
       }
   }
-  catch( EXCEPTION ) {
+  CAUGHT_EXCEPTION {
       if( dangle_whine ) 
           warn( "Devel::Size: Encountered dangling pointer in opcode at: %p\n", baseop );
   }
@@ -548,12 +614,17 @@ UV thing_size(const SV * const orig_thing, TRACKING *tv) {
     if (AvALLOC(thing) != 0) {
       total_size += (sizeof(SV *) * (AvARRAY(thing) - AvALLOC(thing)));
       }
-    /* Is there something hanging off the arylen element? */
+#if (PERL_VERSION < 9)
+    /* Is there something hanging off the arylen element?
+       Post 5.9.something this is stored in magic, so will be found there,
+       and Perl_av_arylen_p() takes a non-const AV*, hence compilers rightly
+       complain about AvARYLEN() passing thing to it.  */
     if (AvARYLEN(thing)) {
       if (check_new(tv, AvARYLEN(thing))) {
     total_size += thing_size(AvARYLEN(thing), tv);
       }
     }
+#endif
     total_size += magic_size(thing, tv);
     TAG;break;
   case SVt_PVHV: TAG;
@@ -601,11 +672,18 @@ UV thing_size(const SV * const orig_thing, TRACKING *tv) {
     if (check_new(tv, CvOUTSIDE(thing))) {
       total_size += thing_size((SV *)CvOUTSIDE(thing), tv);
     }
-    if (check_new(tv, CvSTART(thing))) {
-      total_size += op_size(CvSTART(thing), tv);
-    }
-    if (check_new(tv, CvROOT(thing))) {
-      total_size += op_size(CvROOT(thing), tv);
+    if (CvISXSUB(thing)) {
+	SV *sv = cv_const_sv((CV *)thing);
+	if (sv) {
+	    total_size += thing_size(sv, tv);
+	}
+    } else {
+	if (check_new(tv, CvSTART(thing))) {
+	    total_size += op_size(CvSTART(thing), tv);
+	}
+	if (check_new(tv, CvROOT(thing))) {
+	    total_size += op_size(CvROOT(thing), tv);
+	}
     }
 
     TAG;break;
@@ -668,7 +746,7 @@ UV thing_size(const SV * const orig_thing, TRACKING *tv) {
   case SVt_PVIO: TAG;
     total_size += sizeof(XPVIO);
     total_size += magic_size(thing, tv);
-    if (check_new(tv, (SvPVX(thing)))) {
+    if (check_new(tv, (SvPVX_const(thing)))) {
       total_size += ((XPVIO *) SvANY(thing))->xpv_cur;
     }
     /* Some embedded char pointers */
@@ -718,10 +796,7 @@ size(orig_thing)
      SV *orig_thing
 CODE:
 {
-  int i;
   SV *thing = orig_thing;
-  /* Hash to track our seen pointers */
-  //HV *tracking_hash = newHV();
   SV *warn_flag;
   TRACKING *tv;
   Newz( 0xfc0ff, tv, 1, TRACKING );
@@ -751,13 +826,7 @@ CODE:
 #endif
 
   RETVAL = thing_size(thing, tv);
-  /* Clean up after ourselves */
-  //SvREFCNT_dec(tracking_hash);
-  for( i = 0; i < TRACKING_SLOTS; ++i ) {
-    if( (*tv)[ i ] )
-        Safefree( (*tv)[ i ] );
-  }
-  Safefree( tv );    
+  free_tracking(tv);
 }
 OUTPUT:
   RETVAL
@@ -768,10 +837,7 @@ total_size(orig_thing)
        SV *orig_thing
 CODE:
 {
-  int i;
   SV *thing = orig_thing;
-  /* Hash to track our seen pointers */
-  //HV *tracking_hash;
   TRACKING *tv;
   /* Array with things we still need to do */
   AV *pending_array;
@@ -794,7 +860,6 @@ CODE:
   }
 
   /* init these after the go_yell above */
-  //tracking_hash = newHV();
   Newz( 0xfc0ff, tv, 1, TRACKING );
   pending_array = newAV();
 
@@ -911,14 +976,8 @@ CODE:
 #endif
     }
   } /* end while */
-  
-  /* Clean up after ourselves */
-  //SvREFCNT_dec(tracking_hash);
-  for( i = 0; i < TRACKING_SLOTS; ++i ) {
-    if( (*tv)[ i ] )
-        Safefree( (*tv)[ i ] );
-  }
-  Safefree( tv );    
+
+  free_tracking(tv);
   SvREFCNT_dec(pending_array);
 }
 OUTPUT:

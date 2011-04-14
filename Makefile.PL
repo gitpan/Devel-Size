@@ -1,11 +1,8 @@
+use 5.008;
 use ExtUtils::MakeMaker;
-use Config;
 
-my %options = (       
+WriteMakefile(
   NAME => 'Devel::Size',
-  LIBS => $Config{cc} eq 'gcc' || $Config{cc} eq 'cc' ? ['-lstdc++'] : '',
   VERSION_FROM => 'lib/Devel/Size.pm',
-  CC => $Config{cc} eq 'cl' ? 'cl' : 'g++',
+  ($ExtUtils::MakeMaker::VERSION >= 6.47 ? (MIN_PERL_VERSION => '5.008') : ()),
 );
-
-WriteMakefile(%options);

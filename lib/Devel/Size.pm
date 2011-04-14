@@ -5,9 +5,9 @@ use vars qw($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $warn $dangle);
 
 require 5.008;
 require Exporter;
-require DynaLoader;
+require XSLoader;
 
-@ISA = qw(Exporter DynaLoader);
+@ISA = qw(Exporter);
 
 # This allows declaration   use Devel::Size ':all';
 %EXPORT_TAGS = ( 'all' => [ qw(
@@ -17,9 +17,9 @@ require DynaLoader;
 @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
 
 @EXPORT = qw( );
-$VERSION = '0.72';
+$VERSION = '0.72_50';
 
-bootstrap Devel::Size $VERSION;
+XSLoader::load( __PACKAGE__);
 
 $warn = 1;
 $dangle = 0; ## Set true to enable warnings about dangling pointers
@@ -187,41 +187,26 @@ larger.
 
 =head1 DANGERS
 
-Since version 7.2, Devel::Size uses a new pointer tracking mechanism
+Since version 0.72, Devel::Size uses a new pointer tracking mechanism
 that consumes far less memory than was previously the case. It does this
 by using a bit vector where 1 bit represents each 4- or 8-byte aligned pointer
 (32- or 64-bit platform dependant) that could exist. Further, it segments
 that bit vector and only allocates each chunk when an address is seen within
-that chunk. By default, the module builds a static table of 8,192 slots of
-16k chunks which is sufficient to cover the full 4GB virtual address space on
-32-bit platforms. Or the first 8GB on 64-bit platforms.
+that chunk. Since version 0.73, chunks are allocated in blocks of 2**16 bits
+(ie 8K), accessed via a 256-way tree. The tree is 2 levels deep on a 32 bit
+system, 6 levels deep on a 64 bit system. This avoids having make any
+assumptions about address layout on 64 bit systems or trade offs about sizes
+to allocate. It assumes that the addresses of allocated pointers are reasonably
+contiguous, so that relevant parts of the tree stay in the CPU cache.
 
 Besides saving a lot of memory, this change means that Devel::Size
 runs significantly faster than previous versions.
-
-One caveat of this new mechanism is that on 64-bit platforms with more than 8GB
-of memory a new fatal error may be seen. See the next section.
 
 =head1 Messages: texts originating from this module.
 
 =head2 Errors
 
 =over 4
-
-=item   "Devel::Size: Please rebuild D::S with TRACKING_SLOTS > 8192"
-
-This fatal error may be produced when using Devel::Size on 64-bit platforms
-with more than 8GB of virtual memory. It indicates that a pointer has been
-encountered that is to high for the internal pointer tracking mechanism.
-
-The solution is to rebuild Devel::Size having edited Size.XS to increase
-the value of
-
-    #define TRACKING_SLOTS 8192
-
-On 64-bit platforms, Devel::Size requires 1 slot for each 1MB of virtual
-address space.  So, for a system with 12GB of memory, this should be set to
-12GB / 1MB = 12884901888 / 1048576 = 12288 ( 12 * 1024 ).
 
 =item   "Devel::Size: Unknown variable type"
 
@@ -250,14 +235,15 @@ These may be disabled by setting
 
 =back
 
-=head2 New warnings since 7.2
+=head2 New warnings since 0.72
 
 Devel::Size has always been vulnerable to trapping when traversing Perl's
 internal data structures, if it encounters uninitialised (dangling) pointers.
 
-Exception handling has been added to deal with this possibility, and Devel::Size
-will now attempt to ignore (or log) them and continue. These messages are mainly
-of interest to Devel::Size and core developers, and so are disabled by default.
+MSVC provides exception handling able to deal with this possibility, and when
+built with MSVC Devel::Size will now attempt to ignore (or log) them and
+continue. These messages are mainly of interest to Devel::Size and core
+developers, and so are disabled by default.
 
 They may be enabled by setting
 
@@ -290,9 +276,11 @@ Dan Sugalski dan@sidhe.org
 
 Small portion taken from the B module as shipped with perl 5.6.2.
 
-New pointer tracking & exception handling by BrowserUK
+Previously maintained by Tels <http://bloodgate.com>
 
-Maintained now by Tels <http://bloodgate.com>
+New pointer tracking & exception handling for 0.72 by BrowserUK
+
+Currently maintained by Nicholas Clark
 
 =head1 COPYRIGHT
 

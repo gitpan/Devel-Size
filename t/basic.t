@@ -3,12 +3,10 @@
 use Test::More;
 use strict;
 
-my $tests;
-
 BEGIN
    {
    chdir 't' if -d 't';
-   plan tests => 13;
+   plan tests => 15;
 
    use lib '../lib';
    use lib '../blib/arch';
@@ -23,7 +21,7 @@ can_ok ('Devel::Size', qw/
 Devel::Size->import( qw(size total_size) );
 
 die ("Uhoh, test uses an outdated version of Devel::Size")
-  unless is ($Devel::Size::VERSION, '0.72', 'VERSION MATCHES');
+  unless is ($Devel::Size::VERSION, '0.72_50', 'VERSION MATCHES');
 
 #############################################################################
 # some basic checks:
@@ -35,8 +33,8 @@ $foo = "12";
 
 my $x = "A string";
 my $y = "A much much longer string";        # need to be at least 7 bytes longer for 64 bit
-ok (size($x) < size($y), 'size() of strings');
-ok (total_size($x) < total_size($y), 'total_size() of strings');
+cmp_ok(size($x), '<', size($y), 'size() of strings');
+cmp_ok(total_size($x), '<', total_size($y), 'total_size() of strings');
 
 my @x = (1..4);
 my @y = (1..200);
@@ -44,7 +42,7 @@ my @y = (1..200);
 my $size_1 = total_size(\@x);
 my $size_2 = total_size(\@y);
 
-ok ( $size_1 < $size_2, 'size() of array refs');
+cmp_ok($size_1, '<', $size_2, 'size() of array refs');
 
 # the arrays alone shouldn't be the same size
 $size_1 = size(\@x);
@@ -61,7 +59,7 @@ $y = 12; $y .= '';
 $size_1 = size($x);
 $size_2 = size($y);
 
-ok ($size_1 < $size_2, ' ."" makes string longer');
+cmp_ok($size_1, '<', $size_2, ' ."" makes string longer');
 
 #############################################################################
 # check that the tracking_hash is working
@@ -95,3 +93,11 @@ isnt (total_size($code), 0, 'total_size($code) > 0');
 ##########################################################
 # RT#14849 (& RT#26781 and possibly RT#29238?)
 isnt( total_size( sub{ do{ my $t=0 }; } ), 0, 'total_size( sub{ my $t=0 } ) > 0' );
+
+# CPAN RT #58484 and #58485
+isnt (total_size(\&total_size), 0, 'total_size(\&total_size) > 0');
+
+use constant LARGE => 'N' x 8192;
+
+cmp_ok (total_size(\&LARGE), '>', 8192,
+        'total_size for a constant includes the constant');
