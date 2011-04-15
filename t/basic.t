@@ -1,27 +1,16 @@
 #!/usr/bin/perl -w
 
-use Test::More;
+use Test::More tests => 14;
 use strict;
-
-BEGIN
-   {
-   chdir 't' if -d 't';
-   plan tests => 15;
-
-   use lib '../lib';
-   use lib '../blib/arch';
-   use_ok('Devel::Size');
-   }
+use Devel::Size qw(size total_size);
 
 can_ok ('Devel::Size', qw/
   size
   total_size
   /);
 
-Devel::Size->import( qw(size total_size) );
-
 die ("Uhoh, test uses an outdated version of Devel::Size")
-  unless is ($Devel::Size::VERSION, '0.72_51', 'VERSION MATCHES');
+  unless is ($Devel::Size::VERSION, '0.72_52', 'VERSION MATCHES');
 
 #############################################################################
 # some basic checks:
@@ -68,8 +57,8 @@ my($a,$b) = (1,2);
 my @ary1 = (\$a, \$a);
 my @ary2 = (\$a, \$b);
 
-isnt ( total_size(\@ary2) - total_size(\@ary1), 0,
-    'total_size(\@ary1) < total_size(\@ary2)');
+cmp_ok(total_size(\@ary1), '<', total_size(\@ary2),
+       'the tracking hash is working');
 
 #############################################################################
 # check that circular references don't mess things up
@@ -81,21 +70,22 @@ is (total_size($c1), total_size($c2), 'circular references');
 #############################################################################
 # GLOBS
 
-isnt (total_size(*foo), 0, 'total_size(*foo) > 0');
+cmp_ok(total_size(*foo), '>', 0, 'total_size(*foo) > 0');
 
 #############################################################################
 # CODE ref
 
 my $code = sub { '1' };
 
-isnt (total_size($code), 0, 'total_size($code) > 0');
+cmp_ok(total_size($code), '>', 0, 'total_size($code) > 0');
 
 ##########################################################
 # RT#14849 (& RT#26781 and possibly RT#29238?)
-isnt( total_size( sub{ do{ my $t=0 }; } ), 0, 'total_size( sub{ my $t=0 } ) > 0' );
+cmp_ok( total_size( sub{ do{ my $t=0 }; } ), '>', 0,
+	'total_size( sub{ my $t=0 } ) > 0' );
 
 # CPAN RT #58484 and #58485
-isnt (total_size(\&total_size), 0, 'total_size(\&total_size) > 0');
+cmp_ok(total_size(\&total_size), '>', 0, 'total_size(\&total_size) > 0');
 
 use constant LARGE => 'N' x 8192;
 
