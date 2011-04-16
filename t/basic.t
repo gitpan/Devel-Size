@@ -1,8 +1,9 @@
 #!/usr/bin/perl -w
 
-use Test::More tests => 14;
+use Test::More tests => 15;
 use strict;
 use Devel::Size qw(size total_size);
+use Scalar::Util qw(weaken);
 
 can_ok ('Devel::Size', qw/
   size
@@ -10,7 +11,7 @@ can_ok ('Devel::Size', qw/
   /);
 
 die ("Uhoh, test uses an outdated version of Devel::Size")
-  unless is ($Devel::Size::VERSION, '0.72_52', 'VERSION MATCHES');
+  unless is ($Devel::Size::VERSION, '0.73', 'VERSION MATCHES');
 
 #############################################################################
 # some basic checks:
@@ -91,3 +92,11 @@ use constant LARGE => 'N' x 8192;
 
 cmp_ok (total_size(\&LARGE), '>', 8192,
         'total_size for a constant includes the constant');
+
+{
+    my $a = [];
+    my $b = \$a;
+    weaken $b;
+    cmp_ok(total_size($a), '>', total_size([]),
+	   'making a weakref upgrades the target to PVMG and adds magic');
+}
