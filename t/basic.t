@@ -11,7 +11,7 @@ can_ok ('Devel::Size', qw/
   /);
 
 die ("Uhoh, test uses an outdated version of Devel::Size")
-  unless is ($Devel::Size::VERSION, '0.73', 'VERSION MATCHES');
+  unless is ($Devel::Size::VERSION, '0.73_50', 'VERSION MATCHES');
 
 #############################################################################
 # some basic checks:
@@ -96,7 +96,7 @@ cmp_ok (total_size(\&LARGE), '>', 8192,
 {
     my $a = [];
     my $b = \$a;
-    weaken $b;
-    cmp_ok(total_size($a), '>', total_size([]),
-	   'making a weakref upgrades the target to PVMG and adds magic');
+    # making a weakref upgrades the target to PVMG and adds magic
+    is(total_size($a), total_size([]),
+       'Any intial reference is dereferenced and discarded');
 }

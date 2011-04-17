@@ -106,7 +106,11 @@ check_new(struct state *st, const void *const p) {
 	bits -= 8;
     } while (bits > LEAF_BITS + BYTE_BITS);
     /* bits now 16 always */
+#if !defined(MULTIPLICITY) || PERL_VERSION > 8 || (PERL_VERSION == 8 && PERL_SUBVERSION > 8)
+    /* 5.8.8 and early have an assert() macro that uses Perl_croak, hence needs
+       a my_perl under multiplicity  */
     assert(bits == 16);
+#endif
     leaf_p = (U8 **)tv_p;
     i = (unsigned int)((cooked_p >> bits) & 0xFF);
     if (!leaf_p[i])
@@ -858,12 +862,10 @@ CODE:
 
   pending_array = newAV();
 
-  /* We cannot push HV/AV directly, only the RV. So deref it
-     later (see below for "*** dereference later") and adjust here for
-     the miscalculation.
+  /* If they passed us a reference then dereference it.
      This is the only way we can check the sizes of arrays and hashes. */
   if (SvROK(thing)) {
-      RETVAL -= thing_size(aTHX_ thing, NULL);
+      thing = SvRV(thing);
   } 
 
   /* Put it on the pending array */
@@ -886,8 +888,6 @@ CODE:
         av_push(pending_array, SvRV(thing));
         } 
       TAG;break;
-
-    /* this is the "*** dereference later" part - see above */
 #if (PERL_VERSION < 11)
         case SVt_RV: TAG;
 #else
