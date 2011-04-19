@@ -6,10 +6,22 @@
 # total_size([]) will NOT return the size of the ref + the array, it will only
 # return the size of the array alone!
 
-use Test::More tests => 3 + 4 *12;
+use Test::More;
 use strict;
 use Devel::Size ':all';
 
+my %types = (
+    NULL => undef,
+    IV => 42,
+    RV => \1,
+    NV => 3.14,
+    PV => "Perl rocks",
+    PVIV => do { my $a = 1; $a = "One"; $a },
+    PVNV => do { my $a = 3.14; $a = "Mmm, pi"; $a },
+    PVMG => do { my $a = $!; $a = "Bang!"; $a },
+);
+
+plan(tests => 16 + 4 *12 + 2 * scalar keys %types);
 
 #############################################################################
 # verify that pointer sizes in array slots are sensible:
@@ -184,3 +196,81 @@ for my $size (2, 3, 7, 100)
   is ($full_hash, $element_size + $hash_size, 'properly handles undef/non-undef inside arrays');
 
   } # end for different sizes
+
+sub cmp_array_ro {
+    my($got, $want, $desc) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+    is(@$got, @$want, "$desc (same element count)");
+    my $i = @$want;
+    while ($i--) {
+	is($got->[$i], $want->[$i], "$desc (element $i)");
+    }
+}
+
+{
+    my $undef;
+    my $undef_size = total_size($undef);
+    cmp_ok($undef_size, '>', 0, 'non-zero size for NULL');
+
+    my $iv_size = total_size(1);
+    cmp_ok($iv_size, '>', 0, 'non-zero size for IV');
+
+    # Force the array to allocate storage for elements.
+    # This avoids making the assumption that just because it doesn't happen
+    # initially now, it won't stay that way forever.
+    my @array = 42;
+    my $array_1_size = total_size(\@array);
+    cmp_ok($array_1_size, '>', 0, 'non-zero size for array with 1 element');
+
+    $array[2] = 6 * 9;
+
+    my @copy = @array;
+
+    # This might be making too many assumptions about the current implementation
+    my $array_2_size = total_size(\@array);
+    is($array_2_size, $array_1_size + $iv_size,
+       "gaps in arrays don't allocate scalars");
+
+    # Avoid using is_deeply() as that will read $#array, which is a write
+    # action prior to 5.12. (Different writes on 5.10 and 5.8-and-earlier, but
+    # a write either way, allocating memory.
+    cmp_array_ro(\@array, \@copy, 'two arrays compare the same');
+
+    # A write action:
+    $array[1] = undef;
+
+    is(total_size(\@array), $array_2_size + $undef_size,
+       "assigning undef to a gap in an array allocates a scalar");
+
+    cmp_array_ro(\@array, \@copy, 'two arrays compare the same');
+}
+
+{
+    my %sizes;
+    # reverse sort ensures that PVIV, PVNV and RV are processed before
+    # IV, NULL, or NV :-)
+    foreach my $type (reverse sort keys %types) {
+	# Need to make sure this goes in a new scalar every time. Putting it
+	# directly in a lexical means that it's in the pad, and the pad recycles
+	# scalars, a side effect of which is that they get upgraded in ways we
+	# don't really want
+	my $a;
+	$a->[0] = $types{$type};
+	undef $a->[0];
+
+	my $expect = $sizes{$type} = size(\$a->[0]);
+
+	$a->[0] = \('x' x 1024);
+
+	$expect = $sizes{RV} if $type eq 'NULL';
+	$expect = $sizes{PVNV} if $type eq 'NV';
+	$expect = $sizes{PVIV} if $type eq 'IV' && $] < 5.012;
+
+	# Remember, size() removes a level of referencing if present. So add
+	# one, so that we get the size of our reference:
+	is(size(\$a->[0]), $expect,
+	   "Type $type containing a reference, size() does not recurse to the referent");
+	cmp_ok(total_size(\$a->[0]), '>', 1024,
+	       "Type $type, total_size() recurses to the referent");
+    }
+}
