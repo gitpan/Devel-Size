@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 
-use Test::More tests => 15;
+use Test::More tests => 17;
 use strict;
 use Devel::Size qw(size total_size);
 use Scalar::Util qw(weaken);
@@ -11,7 +11,7 @@ can_ok ('Devel::Size', qw/
   /);
 
 die ("Uhoh, test uses an outdated version of Devel::Size")
-    unless is ($Devel::Size::VERSION, '0.74_50', 'VERSION MATCHES');
+    unless is ($Devel::Size::VERSION, '0.74_51', 'VERSION MATCHES');
 
 #############################################################################
 # some basic checks:
@@ -69,11 +69,6 @@ my($c1,$c2); $c2 = \$c1; $c1 = \$c2;
 is (total_size($c1), total_size($c2), 'circular references');
 
 #############################################################################
-# GLOBS
-
-cmp_ok(total_size(*foo), '>', 0, 'total_size(*foo) > 0');
-
-#############################################################################
 # CODE ref
 
 my $code = sub { '1' };
@@ -99,4 +94,14 @@ cmp_ok (total_size(\&LARGE), '>', 8192,
     # making a weakref upgrades the target to PVMG and adds magic
     is(total_size($a), total_size([]),
        'Any intial reference is dereferenced and discarded');
+}
+
+# Must call direct - avoid all copying:
+foreach(['undef', total_size(undef)],
+	['no', total_size(1 == 0)],
+	['yes', total_size(1 == 1)],
+       ) {
+    my ($name, $size) = @$_;
+    is($size, 0,
+       "PL_sv_$name is interpeter wide, so not counted as part of the structure's size");
 }
