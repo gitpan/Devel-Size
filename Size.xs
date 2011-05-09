@@ -12,6 +12,14 @@
 #ifndef SvRV_const
 #  define SvRV_const(rv) SvRV(rv)
 #endif
+#ifndef SvOOK_offset
+#  define SvOOK_offset(sv, len) STMT_START { len = SvIVX(sv); } STMT_END
+#endif
+
+#if PERL_VERSION < 6
+#  define PL_opargs opargs
+#  define PL_op_name op_name
+#endif
 
 #ifdef _MSC_VER 
 /* "structured exception" handling is a Microsoft extension to C and C++.
@@ -173,7 +181,7 @@ free_state(struct state *st)
 #define SOME_RECURSION 1
 #define TOTAL_SIZE_RECURSION 2
 
-static bool sv_size(pTHX_ struct state *, const SV *const, const int recurse);
+static void sv_size(pTHX_ struct state *, const SV *const, const int recurse);
 
 typedef enum {
     OPc_NULL,   /* 0 */
@@ -188,6 +196,13 @@ typedef enum {
     OPc_PVOP,   /* 9 */
     OPc_LOOP,   /* 10 */
     OPc_COP /* 11 */
+#ifdef OA_CONDOP
+    , OPc_CONDOP /* 12 */
+#endif
+#ifdef OA_GVOP
+    , OPc_GVOP /* 13 */
+#endif
+
 } opclass;
 
 static opclass
@@ -233,9 +248,17 @@ cc_opclass(const OP * const o)
         case OA_SVOP: TAG;
         return OPc_SVOP;
 
+#ifdef OA_PADOP
         case OA_PADOP: TAG;
         return OPc_PADOP;
+#endif
 
+#ifdef OA_GVOP
+        case OA_GVOP: TAG;
+        return OPc_GVOP;
+#endif
+
+#ifdef OA_PVOP_OR_SVOP
         case OA_PVOP_OR_SVOP: TAG;
             /*
              * Character translations (tr///) are usually a PVOP, keeping a 
@@ -246,6 +269,7 @@ cc_opclass(const OP * const o)
              */
         return (o->op_private & (OPpTRANS_TO_UTF|OPpTRANS_FROM_UTF))
             ? OPc_SVOP : OPc_PVOP;
+#endif
 
         case OA_LOOP: TAG;
         return OPc_LOOP;
@@ -295,6 +319,11 @@ cc_opclass(const OP * const o)
             return OPc_BASEOP;
         else
             return OPc_PVOP;
+
+#ifdef OA_CONDOP
+        case OA_CONDOP: TAG;
+	    return OPc_CONDOP;
+#endif
         }
         warn("Devel::Size: Can't determine class of operator %s, assuming BASEOP\n",
          PL_op_name[o->op_type]);
@@ -302,11 +331,6 @@ cc_opclass(const OP * const o)
     CAUGHT_EXCEPTION { }
     return OPc_BASEOP;
 }
-
-
-#if !defined(NV)
-#define NV double
-#endif
 
 /* Figure out how much magic is attached to the SV and return the
    size */
@@ -317,12 +341,12 @@ magic_size(pTHX_ const SV * const thing, struct state *st) {
   /* Have we seen the magic pointer?  (NULL has always been seen before)  */
   while (check_new(st, magic_pointer)) {
     st->total_size += sizeof(MAGIC);
+    /* magic vtables aren't freed when magic is freed, so don't count them.
+       (They are static structures. Anything that assumes otherwise is buggy.)
+    */
+
 
     TRY_TO_CATCH_SEGV {
-        /* Have we seen the magic vtable? */
-        if (check_new(st, magic_pointer->mg_virtual)) {
-          st->total_size += sizeof(MGVTBL);
-        }
 	sv_size(aTHX_ st, magic_pointer->mg_obj, TOTAL_SIZE_RECURSION);
 	if (magic_pointer->mg_len == HEf_SVKEY) {
 	    sv_size(aTHX_ st, (SV *)magic_pointer->mg_ptr, TOTAL_SIZE_RECURSION);
@@ -392,38 +416,45 @@ op_size(pTHX_ const OP * const baseop, struct state *st)
 	    TAG;break;
 	case OPc_UNOP: TAG;
 	    st->total_size += sizeof(struct unop);
-	    op_size(aTHX_ cUNOPx(baseop)->op_first, st);
+	    op_size(aTHX_ ((UNOP *)baseop)->op_first, st);
 	    TAG;break;
 	case OPc_BINOP: TAG;
 	    st->total_size += sizeof(struct binop);
-	    op_size(aTHX_ cBINOPx(baseop)->op_first, st);
-	    op_size(aTHX_ cBINOPx(baseop)->op_last, st);
+	    op_size(aTHX_ ((BINOP *)baseop)->op_first, st);
+	    op_size(aTHX_ ((BINOP *)baseop)->op_last, st);
 	    TAG;break;
 	case OPc_LOGOP: TAG;
 	    st->total_size += sizeof(struct logop);
-	    op_size(aTHX_ cBINOPx(baseop)->op_first, st);
-	    op_size(aTHX_ cLOGOPx(baseop)->op_other, st);
+	    op_size(aTHX_ ((BINOP *)baseop)->op_first, st);
+	    op_size(aTHX_ ((LOGOP *)baseop)->op_other, st);
 	    TAG;break;
+#ifdef OA_CONDOP
+	case OPc_CONDOP: TAG;
+	    st->total_size += sizeof(struct condop);
+	    op_size(aTHX_ ((BINOP *)baseop)->op_first, st);
+	    op_size(aTHX_ ((CONDOP *)baseop)->op_true, st);
+	    op_size(aTHX_ ((CONDOP *)baseop)->op_false, st);
+	    TAG;break;
+#endif
 	case OPc_LISTOP: TAG;
 	    st->total_size += sizeof(struct listop);
-	    op_size(aTHX_ cLISTOPx(baseop)->op_first, st);
-	    op_size(aTHX_ cLISTOPx(baseop)->op_last, st);
+	    op_size(aTHX_ ((LISTOP *)baseop)->op_first, st);
+	    op_size(aTHX_ ((LISTOP *)baseop)->op_last, st);
 	    TAG;break;
 	case OPc_PMOP: TAG;
 	    st->total_size += sizeof(struct pmop);
-	    op_size(aTHX_ cPMOPx(baseop)->op_first, st);
-	    op_size(aTHX_ cPMOPx(baseop)->op_last, st);
+	    op_size(aTHX_ ((PMOP *)baseop)->op_first, st);
+	    op_size(aTHX_ ((PMOP *)baseop)->op_last, st);
 #if PERL_VERSION < 9 || (PERL_VERSION == 9 && PERL_SUBVERSION < 5)
-	    op_size(aTHX_ cPMOPx(baseop)->op_pmreplroot, st);
-	    op_size(aTHX_ cPMOPx(baseop)->op_pmreplstart, st);
-	    op_size(aTHX_ (OP *)cPMOPx(baseop)->op_pmnext, st);
+	    op_size(aTHX_ ((PMOP *)baseop)->op_pmreplroot, st);
+	    op_size(aTHX_ ((PMOP *)baseop)->op_pmreplstart, st);
 #endif
 	    /* This is defined away in perl 5.8.x, but it is in there for
 	       5.6.x */
 #ifdef PM_GETRE
-	    regex_size(PM_GETRE(cPMOPx(baseop)), st);
+	    regex_size(PM_GETRE((PMOP *)baseop), st);
 #else
-	    regex_size(cPMOPx(baseop)->op_pmregexp, st);
+	    regex_size(((PMOP *)baseop)->op_pmregexp, st);
 #endif
 	    TAG;break;
 	case OPc_SVOP: TAG;
@@ -431,22 +462,30 @@ op_size(pTHX_ const OP * const baseop, struct state *st)
 	    if (!(baseop->op_type == OP_AELEMFAST
 		  && baseop->op_flags & OPf_SPECIAL)) {
 		/* not an OP_PADAV replacement */
-		sv_size(aTHX_ st, cSVOPx(baseop)->op_sv, SOME_RECURSION);
+		sv_size(aTHX_ st, ((SVOP *)baseop)->op_sv, SOME_RECURSION);
 	    }
 	    TAG;break;
+#ifdef OA_PADOP
       case OPc_PADOP: TAG;
 	  st->total_size += sizeof(struct padop);
 	  TAG;break;
+#endif
+#ifdef OA_GVOP
+      case OPc_GVOP: TAG;
+	  st->total_size += sizeof(struct gvop);
+	  sv_size(aTHX_ st, ((GVOP *)baseop)->op_gv, SOME_RECURSION);
+	  TAG;break;
+#endif
 	case OPc_PVOP: TAG;
-	    check_new_and_strlen(st, cPVOPx(baseop)->op_pv);
+	    check_new_and_strlen(st, ((PVOP *)baseop)->op_pv);
 	    TAG;break;
 	case OPc_LOOP: TAG;
 	    st->total_size += sizeof(struct loop);
-	    op_size(aTHX_ cLOOPx(baseop)->op_first, st);
-	    op_size(aTHX_ cLOOPx(baseop)->op_last, st);
-	    op_size(aTHX_ cLOOPx(baseop)->op_redoop, st);
-	    op_size(aTHX_ cLOOPx(baseop)->op_nextop, st);
-	    op_size(aTHX_ cLOOPx(baseop)->op_lastop, st);
+	    op_size(aTHX_ ((LOOP *)baseop)->op_first, st);
+	    op_size(aTHX_ ((LOOP *)baseop)->op_last, st);
+	    op_size(aTHX_ ((LOOP *)baseop)->op_redoop, st);
+	    op_size(aTHX_ ((LOOP *)baseop)->op_nextop, st);
+	    op_size(aTHX_ ((LOOP *)baseop)->op_lastop, st);
 	    TAG;break;
 	case OPc_COP: TAG;
         {
@@ -484,113 +523,139 @@ op_size(pTHX_ const OP * const baseop, struct state *st)
   }
 }
 
-#if PERL_VERSION > 9 || (PERL_VERSION == 9 && PERL_SUBVERSION > 2)
-#  define NEW_HEAD_LAYOUT
+#if PERL_VERSION < 8 || PERL_SUBVERSION < 9
+#  define SVt_LAST 16
 #endif
 
-static bool
+#ifdef PURIFY
+#  define MAYBE_PURIFY(normal, pure) (pure)
+#  define MAYBE_OFFSET(struct_name, member) 0
+#else
+#  define MAYBE_PURIFY(normal, pure) (normal)
+#  define MAYBE_OFFSET(struct_name, member) STRUCT_OFFSET(struct_name, member)
+#endif
+
+const U8 body_sizes[SVt_LAST] = {
+#if PERL_VERSION < 9
+     0,                                                       /* SVt_NULL */
+     MAYBE_PURIFY(sizeof(IV), sizeof(XPVIV)),                 /* SVt_IV */
+     MAYBE_PURIFY(sizeof(NV), sizeof(XPVNV)),                 /* SVt_NV */
+     sizeof(XRV),                                             /* SVt_RV */
+     sizeof(XPV),                                             /* SVt_PV */
+     sizeof(XPVIV),                                           /* SVt_PVIV */
+     sizeof(XPVNV),                                           /* SVt_PVNV */
+     sizeof(XPVMG),                                           /* SVt_PVMG */
+     sizeof(XPVBM),                                           /* SVt_PVBM */
+     sizeof(XPVLV),                                           /* SVt_PVLV */
+     sizeof(XPVAV),                                           /* SVt_PVAV */
+     sizeof(XPVHV),                                           /* SVt_PVHV */
+     sizeof(XPVCV),                                           /* SVt_PVCV */
+     sizeof(XPVGV),                                           /* SVt_PVGV */
+     sizeof(XPVFM),                                           /* SVt_PVFM */
+     sizeof(XPVIO)                                            /* SVt_PVIO */
+#elif PERL_VERSION == 10 && PERL_SUBVERSION == 0
+     0,                                                       /* SVt_NULL */
+     0,                                                       /* SVt_BIND */
+     0,                                                       /* SVt_IV */
+     MAYBE_PURIFY(sizeof(NV), sizeof(XPVNV)),                 /* SVt_NV */
+     0,                                                       /* SVt_RV */
+     MAYBE_PURIFY(sizeof(xpv_allocated), sizeof(XPV)),        /* SVt_PV */
+     MAYBE_PURIFY(sizeof(xpviv_allocated), sizeof(XPVIV)),/* SVt_PVIV */
+     sizeof(XPVNV),                                           /* SVt_PVNV */
+     sizeof(XPVMG),                                           /* SVt_PVMG */
+     sizeof(XPVGV),                                           /* SVt_PVGV */
+     sizeof(XPVLV),                                           /* SVt_PVLV */
+     MAYBE_PURIFY(sizeof(xpvav_allocated), sizeof(XPVAV)),/* SVt_PVAV */
+     MAYBE_PURIFY(sizeof(xpvhv_allocated), sizeof(XPVHV)),/* SVt_PVHV */
+     MAYBE_PURIFY(sizeof(xpvcv_allocated), sizeof(XPVCV)),/* SVt_PVCV */
+     MAYBE_PURIFY(sizeof(xpvfm_allocated), sizeof(XPVFM)),/* SVt_PVFM */
+     sizeof(XPVIO),                                           /* SVt_PVIO */
+#elif PERL_VERSION == 10 && PERL_SUBVERSION == 1
+     0,                                                       /* SVt_NULL */
+     0,                                                       /* SVt_BIND */
+     0,                                                       /* SVt_IV */
+     MAYBE_PURIFY(sizeof(NV), sizeof(XPVNV)),                 /* SVt_NV */
+     0,                                                       /* SVt_RV */
+     sizeof(XPV) - MAYBE_OFFSET(XPV, xpv_cur),                /* SVt_PV */
+     sizeof(XPVIV) - MAYBE_OFFSET(XPV, xpv_cur),              /* SVt_PVIV */
+     sizeof(XPVNV),                                           /* SVt_PVNV */
+     sizeof(XPVMG),                                           /* SVt_PVMG */
+     sizeof(XPVGV),                                           /* SVt_PVGV */
+     sizeof(XPVLV),                                           /* SVt_PVLV */
+     sizeof(XPVAV) - MAYBE_OFFSET(XPVAV, xav_fill),           /* SVt_PVAV */
+     sizeof(XPVHV) - MAYBE_OFFSET(XPVHV, xhv_fill),           /* SVt_PVHV */
+     sizeof(XPVCV) - MAYBE_OFFSET(XPVCV, xpv_cur),            /* SVt_PVCV */
+     sizeof(XPVFM) - MAYBE_OFFSET(XPVFM, xpv_cur),            /* SVt_PVFM */
+     sizeof(XPVIO)                                            /* SVt_PVIO */
+#elif PERL_VERSION < 13
+     0,                                                       /* SVt_NULL */
+     0,                                                       /* SVt_BIND */
+     0,                                                       /* SVt_IV */
+     MAYBE_PURIFY(sizeof(NV), sizeof(XPVNV)),                 /* SVt_NV */
+     sizeof(XPV) - MAYBE_OFFSET(XPV, xpv_cur),                /* SVt_PV */
+     sizeof(XPVIV) - MAYBE_OFFSET(XPV, xpv_cur),              /* SVt_PVIV */
+     sizeof(XPVNV),                                           /* SVt_PVNV */
+     sizeof(XPVMG),                                           /* SVt_PVMG */
+     sizeof(regexp) - MAYBE_OFFSET(regexp, xpv_cur),          /* SVt_REGEXP */
+     sizeof(XPVGV),                                           /* SVt_PVGV */
+     sizeof(XPVLV),                                           /* SVt_PVLV */
+     sizeof(XPVAV) - MAYBE_OFFSET(XPVAV, xav_fill),           /* SVt_PVAV */
+     sizeof(XPVHV) - MAYBE_OFFSET(XPVHV, xhv_fill),           /* SVt_PVHV */
+     sizeof(XPVCV) - MAYBE_OFFSET(XPVCV, xpv_cur),            /* SVt_PVCV */
+     sizeof(XPVFM) - MAYBE_OFFSET(XPVFM, xpv_cur),            /* SVt_PVFM */
+     sizeof(XPVIO)                                            /* SVt_PVIO */
+#else
+     0,                                                       /* SVt_NULL */
+     0,                                                       /* SVt_BIND */
+     0,                                                       /* SVt_IV */
+     MAYBE_PURIFY(sizeof(NV), sizeof(XPVNV)),                 /* SVt_NV */
+     sizeof(XPV) - MAYBE_OFFSET(XPV, xpv_cur),                /* SVt_PV */
+     sizeof(XPVIV) - MAYBE_OFFSET(XPV, xpv_cur),              /* SVt_PVIV */
+     sizeof(XPVNV) - MAYBE_OFFSET(XPV, xpv_cur),              /* SVt_PVNV */
+     sizeof(XPVMG),                                           /* SVt_PVMG */
+     sizeof(regexp),                                          /* SVt_REGEXP */
+     sizeof(XPVGV),                                           /* SVt_PVGV */
+     sizeof(XPVLV),                                           /* SVt_PVLV */
+     sizeof(XPVAV),                                           /* SVt_PVAV */
+     sizeof(XPVHV),                                           /* SVt_PVHV */
+     sizeof(XPVCV),                                           /* SVt_PVCV */
+     sizeof(XPVFM),                                           /* SVt_PVFM */
+     sizeof(XPVIO)                                            /* SVt_PVIO */
+#endif
+};
+
+static void
 sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
 	const int recurse) {
   const SV *thing = orig_thing;
+  U32 type;
 
   if(!check_new(st, thing))
-      return FALSE;
+      return;
 
-  st->total_size += sizeof(SV);
+  type = SvTYPE(thing);
+  if (type > SVt_LAST) {
+      warn("Devel::Size: Unknown variable type: %d encountered\n", type);
+      return;
+  }
+  st->total_size += sizeof(SV) + body_sizes[type];
 
-  switch (SvTYPE(thing)) {
-    /* Is it undef? */
-  case SVt_NULL: TAG;
-    TAG;break;
-    /* Just a plain integer. This will be differently sized depending
-       on whether purify's been compiled in */
-  case SVt_IV: TAG;
-#ifndef NEW_HEAD_LAYOUT
-#  ifdef PURIFY
-    st->total_size += sizeof(sizeof(XPVIV));
-#  else
-    st->total_size += sizeof(IV);
-#  endif
-#endif
-    if(recurse && SvROK(thing))
-	sv_size(aTHX_ st, SvRV_const(thing), recurse);
-    TAG;break;
-    /* Is it a float? Like the int, it depends on purify */
-  case SVt_NV: TAG;
-#ifdef PURIFY
-    st->total_size += sizeof(sizeof(XPVNV));
-#else
-    st->total_size += sizeof(NV);
-#endif
-    TAG;break;
-#if (PERL_VERSION < 11)     
+  if (type >= SVt_PVMG) {
+      magic_size(aTHX_ thing, st);
+  }
+
+  switch (type) {
+#if (PERL_VERSION < 11)
     /* Is it a reference? */
   case SVt_RV: TAG;
-#ifndef NEW_HEAD_LAYOUT
-    st->total_size += sizeof(XRV);
+#else
+  case SVt_IV: TAG;
 #endif
     if(recurse && SvROK(thing))
 	sv_size(aTHX_ st, SvRV_const(thing), recurse);
     TAG;break;
-#endif
-    /* How about a plain string? In which case we need to add in how
-       much has been allocated */
-  case SVt_PV: TAG;
-    st->total_size += sizeof(XPV);
-    if(recurse && SvROK(thing))
-	sv_size(aTHX_ st, SvRV_const(thing), recurse);
-    else
-	st->total_size += SvLEN(thing);
-    TAG;break;
-    /* A string with an integer part? */
-  case SVt_PVIV: TAG;
-    st->total_size += sizeof(XPVIV);
-    if(recurse && SvROK(thing))
-	sv_size(aTHX_ st, SvRV_const(thing), recurse);
-    else
-	st->total_size += SvLEN(thing);
-    if(SvOOK(thing)) {
-        st->total_size += SvIVX(thing);
-    }
-    TAG;break;
-    /* A scalar/string/reference with a float part? */
-  case SVt_PVNV: TAG;
-    st->total_size += sizeof(XPVNV);
-    if(recurse && SvROK(thing))
-	sv_size(aTHX_ st, SvRV_const(thing), recurse);
-    else
-	st->total_size += SvLEN(thing);
-    TAG;break;
-  case SVt_PVMG: TAG;
-    st->total_size += sizeof(XPVMG);
-    if(recurse && SvROK(thing))
-	sv_size(aTHX_ st, SvRV_const(thing), recurse);
-    else
-	st->total_size += SvLEN(thing);
-    magic_size(aTHX_ thing, st);
-    TAG;break;
-#if PERL_VERSION <= 8
-  case SVt_PVBM: TAG;
-    st->total_size += sizeof(XPVBM);
-    if(recurse && SvROK(thing))
-	sv_size(aTHX_ st, SvRV_const(thing), recurse);
-    else
-	st->total_size += SvLEN(thing);
-    magic_size(aTHX_ thing, st);
-    TAG;break;
-#endif
-  case SVt_PVLV: TAG;
-    st->total_size += sizeof(XPVLV);
-    if(recurse && SvROK(thing))
-	sv_size(aTHX_ st, SvRV_const(thing), recurse);
-    else
-	st->total_size += SvLEN(thing);
-    magic_size(aTHX_ thing, st);
-    TAG;break;
-    /* How much space is dedicated to the array? Not counting the
-       elements in the array, mind, just the array itself */
+
   case SVt_PVAV: TAG;
-    st->total_size += sizeof(XPVAV);
     /* Is there anything in the array? */
     if (AvMAX(thing) != -1) {
       /* an array with 10 slots has AvMax() set to 9 - te 2007-04-22 */
@@ -621,11 +686,8 @@ sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
        complain about AvARYLEN() passing thing to it.  */
     sv_size(aTHX_ st, AvARYLEN(thing), recurse);
 #endif
-    magic_size(aTHX_ thing, st);
     TAG;break;
   case SVt_PVHV: TAG;
-    /* First the base struct */
-    st->total_size += sizeof(XPVHV);
     /* Now the array of buckets */
     st->total_size += (sizeof(HE *) * (HvMAX(thing) + 1));
     /* Now walk the bucket chain */
@@ -648,13 +710,20 @@ sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
         }
       }
     }
-    magic_size(aTHX_ thing, st);
     TAG;break;
-  case SVt_PVCV: TAG;
-    st->total_size += sizeof(XPVCV);
-    magic_size(aTHX_ thing, st);
 
-    st->total_size += ((XPVIO *) SvANY(thing))->xpv_len;
+
+  case SVt_PVFM: TAG;
+    sv_size(aTHX_ st, (SV *)CvPADLIST(thing), SOME_RECURSION);
+    sv_size(aTHX_ st, (SV *)CvOUTSIDE(thing), recurse);
+
+    if (st->go_yell && !st->fm_whine) {
+      carp("Devel::Size: Calculated sizes for FMs are incomplete");
+      st->fm_whine = 1;
+    }
+    goto freescalar;
+
+  case SVt_PVCV: TAG;
     sv_size(aTHX_ st, (SV *)CvSTASH(thing), SOME_RECURSION);
     sv_size(aTHX_ st, (SV *)SvSTASH(thing), SOME_RECURSION);
     sv_size(aTHX_ st, (SV *)CvGV(thing), SOME_RECURSION);
@@ -666,11 +735,33 @@ sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
 	op_size(aTHX_ CvSTART(thing), st);
 	op_size(aTHX_ CvROOT(thing), st);
     }
+    goto freescalar;
 
-    TAG;break;
+  case SVt_PVIO: TAG;
+    /* Some embedded char pointers */
+    check_new_and_strlen(st, ((XPVIO *) SvANY(thing))->xio_top_name);
+    check_new_and_strlen(st, ((XPVIO *) SvANY(thing))->xio_fmt_name);
+    check_new_and_strlen(st, ((XPVIO *) SvANY(thing))->xio_bottom_name);
+    /* Throw the GVs on the list to be walked if they're not-null */
+    sv_size(aTHX_ st, (SV *)((XPVIO *) SvANY(thing))->xio_top_gv, recurse);
+    sv_size(aTHX_ st, (SV *)((XPVIO *) SvANY(thing))->xio_bottom_gv, recurse);
+    sv_size(aTHX_ st, (SV *)((XPVIO *) SvANY(thing))->xio_fmt_gv, recurse);
+
+    /* Only go trotting through the IO structures if they're really
+       trottable. If USE_PERLIO is defined we can do this. If
+       not... we can't, so we don't even try */
+#ifdef USE_PERLIO
+    /* Dig into xio_ifp and xio_ofp here */
+    warn("Devel::Size: Can't size up perlio layers yet\n");
+#endif
+    goto freescalar;
+
+  case SVt_PVLV: TAG;
+#if (PERL_VERSION < 9)
+    goto freescalar;
+#endif
+
   case SVt_PVGV: TAG;
-    magic_size(aTHX_ thing, st);
-    st->total_size += sizeof(XPVGV);
     if(isGV_with_GP(thing)) {
 	st->total_size += GvNAMELEN(thing);
 #ifdef GvFILE
@@ -695,70 +786,39 @@ sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
 	    sv_size(aTHX_ st, (SV *)(GvGP(thing)->gp_egv), recurse);
 	    sv_size(aTHX_ st, (SV *)(GvGP(thing)->gp_cv), recurse);
 	}
-    }
-    TAG;break;
-  case SVt_PVFM: TAG;
-    st->total_size += sizeof(XPVFM);
-    magic_size(aTHX_ thing, st);
-    st->total_size += ((XPVIO *) SvANY(thing))->xpv_len;
-    sv_size(aTHX_ st, (SV *)CvPADLIST(thing), SOME_RECURSION);
-    sv_size(aTHX_ st, (SV *)CvOUTSIDE(thing), recurse);
-
-    if (st->go_yell && !st->fm_whine) {
-      carp("Devel::Size: Calculated sizes for FMs are incomplete");
-      st->fm_whine = 1;
-    }
-    TAG;break;
-  case SVt_PVIO: TAG;
-    st->total_size += sizeof(XPVIO);
-    magic_size(aTHX_ thing, st);
-    if (check_new(st, (SvPVX_const(thing)))) {
-      st->total_size += ((XPVIO *) SvANY(thing))->xpv_cur;
-    }
-    /* Some embedded char pointers */
-    check_new_and_strlen(st, ((XPVIO *) SvANY(thing))->xio_top_name);
-    check_new_and_strlen(st, ((XPVIO *) SvANY(thing))->xio_fmt_name);
-    check_new_and_strlen(st, ((XPVIO *) SvANY(thing))->xio_bottom_name);
-    /* Throw the GVs on the list to be walked if they're not-null */
-    sv_size(aTHX_ st, (SV *)((XPVIO *) SvANY(thing))->xio_top_gv, recurse);
-    sv_size(aTHX_ st, (SV *)((XPVIO *) SvANY(thing))->xio_bottom_gv, recurse);
-    sv_size(aTHX_ st, (SV *)((XPVIO *) SvANY(thing))->xio_fmt_gv, recurse);
-
-    /* Only go trotting through the IO structures if they're really
-       trottable. If USE_PERLIO is defined we can do this. If
-       not... we can't, so we don't even try */
-#ifdef USE_PERLIO
-    /* Dig into xio_ifp and xio_ofp here */
-    warn("Devel::Size: Can't size up perlio layers yet\n");
+#if (PERL_VERSION >= 9)
+	TAG; break;
 #endif
+    }
+#if PERL_VERSION <= 8
+  case SVt_PVBM: TAG;
+#endif
+  case SVt_PVMG: TAG;
+  case SVt_PVNV: TAG;
+  case SVt_PVIV: TAG;
+  case SVt_PV: TAG;
+  freescalar:
+    if(recurse && SvROK(thing))
+	sv_size(aTHX_ st, SvRV_const(thing), recurse);
+    else
+	st->total_size += SvLEN(thing);
+
+    if(SvOOK(thing)) {
+	STRLEN len;
+	SvOOK_offset(thing, len);
+	st->total_size += len;
+    }
     TAG;break;
-  default:
-    warn("Devel::Size: Unknown variable type: %d encountered\n", SvTYPE(thing) );
+
   }
-  return TRUE;
+  return;
 }
-
-/* Frustratingly, the vtables aren't const in perl.h
-   gcc is happy enough to have non-const initialisers in a static array.
-   VC seems not to be. (Is it actually treating the file as C++?)
-   So do the maximally portable thing, unless we know it's gcc, in which case
-   we can do the more space efficient version.  */
-
-#if __GNUC__
-void *vtables[] = {
-#include "vtables.inc"
-    NULL
-};
-#endif
 
 static struct state *
 new_state(pTHX)
 {
     SV *warn_flag;
     struct state *st;
-#if __GNUC__
-    void **vt_p = vtables;
-#endif
 
     Newxz(st, 1, struct state);
     st->go_yell = TRUE;
@@ -771,11 +831,8 @@ new_state(pTHX)
     check_new(st, &PL_sv_undef);
     check_new(st, &PL_sv_no);
     check_new(st, &PL_sv_yes);
-#if __GNUC__
-    while(*vt_p)
-	check_new(st, *vt_p++);
-#else
-#include "vtables.inc"
+#if PERL_VERSION > 8 || (PERL_VERSION == 8 && PERL_SUBVERSION > 0)
+    check_new(st, &PL_sv_placeholder);
 #endif
     return st;
 }
