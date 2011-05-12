@@ -1,3 +1,5 @@
+/* -*- mode: C -*- */
+
 #define PERL_NO_GET_CONTEXT
 
 #include "EXTERN.h"
@@ -14,6 +16,17 @@
 #endif
 #ifndef SvOOK_offset
 #  define SvOOK_offset(sv, len) STMT_START { len = SvIVX(sv); } STMT_END
+#endif
+#ifndef SvIsCOW
+#  define SvIsCOW(sv)           ((SvFLAGS(sv) & (SVf_FAKE | SVf_READONLY)) == \
+                                    (SVf_FAKE | SVf_READONLY))
+#endif
+#ifndef SvIsCOW_shared_hash
+#  define SvIsCOW_shared_hash(sv)   (SvIsCOW(sv) && SvLEN(sv) == 0)
+#endif
+#ifndef SvSHARED_HEK_FROM_PV
+#  define SvSHARED_HEK_FROM_PV(pvx) \
+        ((struct hek*)(pvx - STRUCT_OFFSET(struct hek, hek_key)))
 #endif
 
 #if PERL_VERSION < 6
@@ -146,7 +159,7 @@ free_tracking_at(void **tv, int level)
 	/* Nodes */
 	do {
 	    if (tv[i]) {
-		free_tracking_at(tv[i], level);
+		free_tracking_at((void **) tv[i], level);
 		Safefree(tv[i]);
 	    }
 	} while (i--);
@@ -523,6 +536,29 @@ op_size(pTHX_ const OP * const baseop, struct state *st)
   }
 }
 
+static void
+hek_size(pTHX_ struct state *st, HEK *hek, U32 shared)
+{
+    /* Hash keys can be shared. Have we seen this before? */
+    if (!check_new(st, hek))
+	return;
+    st->total_size += HEK_BASESIZE + hek->hek_len
+#if PERL_VERSION < 8
+	+ 1 /* No hash key flags prior to 5.8.0  */
+#else
+	+ 2
+#endif
+	;
+    if (shared) {
+#if PERL_VERSION < 10
+	st->total_size += sizeof(struct he);
+#else
+	st->total_size += STRUCT_OFFSET(struct shared_he, shared_he_hek);
+#endif
+    }
+}
+
+
 #if PERL_VERSION < 8 || PERL_SUBVERSION < 9
 #  define SVt_LAST 16
 #endif
@@ -698,18 +734,53 @@ sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
         cur_entry = *(HvARRAY(thing) + cur_bucket);
         while (cur_entry) {
           st->total_size += sizeof(HE);
-          if (cur_entry->hent_hek) {
-            /* Hash keys can be shared. Have we seen this before? */
-            if (check_new(st, cur_entry->hent_hek)) {
-              st->total_size += HEK_BASESIZE + cur_entry->hent_hek->hek_len + 2;
-            }
-          }
+	  hek_size(aTHX_ st, cur_entry->hent_hek, HvSHAREKEYS(thing));
 	  if (recurse >= TOTAL_SIZE_RECURSION)
 	      sv_size(aTHX_ st, HeVAL(cur_entry), recurse);
           cur_entry = cur_entry->hent_next;
         }
       }
     }
+#ifdef HvAUX
+    if (SvOOK(thing)) {
+	/* This direct access is arguably "naughty": */
+	struct mro_meta *meta = HvAUX(thing)->xhv_mro_meta;
+#if PERL_VERSION > 13 || PERL_SUBVERSION > 8
+	/* As is this: */
+	I32 count = HvAUX(thing)->xhv_name_count;
+
+	if (count) {
+	    HEK **names = HvAUX(thing)->xhv_name_u.xhvnameu_names;
+	    if (count < 0)
+		count = -count;
+	    while (--count)
+		hek_size(aTHX_ st, names[count], 1);
+	}
+	else
+#endif
+	{
+	    hek_size(aTHX_ st, HvNAME_HEK(thing), 1);
+	}
+
+	st->total_size += sizeof(struct xpvhv_aux);
+	if (meta) {
+	    st->total_size += sizeof(struct mro_meta);
+	    sv_size(aTHX_ st, (SV *)meta->mro_nextmethod, TOTAL_SIZE_RECURSION);
+#if PERL_VERSION > 10 || (PERL_VERSION == 10 && PERL_SUBVERSION > 0)
+	    sv_size(aTHX_ st, (SV *)meta->isa, TOTAL_SIZE_RECURSION);
+#endif
+#if PERL_VERSION > 10
+	    sv_size(aTHX_ st, (SV *)meta->mro_linear_all, TOTAL_SIZE_RECURSION);
+	    sv_size(aTHX_ st, meta->mro_linear_current, TOTAL_SIZE_RECURSION);
+#else
+	    sv_size(aTHX_ st, (SV *)meta->mro_linear_dfs, TOTAL_SIZE_RECURSION);
+	    sv_size(aTHX_ st, (SV *)meta->mro_linear_c3, TOTAL_SIZE_RECURSION);
+#endif
+	}
+    }
+#else
+    check_new_and_strlen(st, HvNAME_get(thing));
+#endif
     TAG;break;
 
 
@@ -763,8 +834,14 @@ sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
 
   case SVt_PVGV: TAG;
     if(isGV_with_GP(thing)) {
+#ifdef GvNAME_HEK
+	hek_size(aTHX_ st, GvNAME_HEK(thing), 1);
+#else	
 	st->total_size += GvNAMELEN(thing);
-#ifdef GvFILE
+#endif
+#ifdef GvFILE_HEK
+	hek_size(aTHX_ st, GvFILE_HEK(thing), 1);
+#elif defined(GvFILE)
 #  if !defined(USE_ITHREADS) || (PERL_VERSION > 8 || (PERL_VERSION == 8 && PERL_SUBVERSION > 8))
 	/* With itreads, before 5.8.9, this can end up pointing to freed memory
 	   if the GV was created in an eval, as GvFILE() points to CopFILE(),
@@ -800,6 +877,8 @@ sv_size(pTHX_ struct state *const st, const SV * const orig_thing,
   freescalar:
     if(recurse && SvROK(thing))
 	sv_size(aTHX_ st, SvRV_const(thing), recurse);
+    else if (SvIsCOW_shared_hash(thing))
+	hek_size(aTHX_ st, SvSHARED_HEK_FROM_PV(SvPVX(thing)), 1);
     else
 	st->total_size += SvLEN(thing);
 

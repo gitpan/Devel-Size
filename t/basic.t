@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 
-use Test::More tests => 19;
+use Test::More tests => 30;
 use strict;
 use Devel::Size qw(size total_size);
 
@@ -10,7 +10,7 @@ can_ok ('Devel::Size', qw/
   /);
 
 die ("Uhoh, test uses an outdated version of Devel::Size")
-    unless is ($Devel::Size::VERSION, '0.76', 'VERSION MATCHES');
+    unless is ($Devel::Size::VERSION, '0.76_50', 'VERSION MATCHES');
 
 #############################################################################
 # some basic checks:
@@ -122,4 +122,52 @@ foreach(['undef', total_size(undef)],
     is(total_size($uurk), $before_size,
        "Size doesn't change because OOK is used");
     cmp_ok(length $uurk, '<', $before_size, 'but string is shorter');
+}
+
+sub shared_hash_keys {
+    my %h = @_;
+    my $one = total_size([keys %h]);
+    cmp_ok($one, '>', 0, 'Size of one entry is sane');
+    my $two =  total_size([keys %h, keys %h]);
+    cmp_ok($two, '>', $one, 'Two take more space than one');
+    my $increment = $two - $one;
+    is(total_size([keys %h, keys %h, keys %h]), $one + 2 * $increment,
+		 'Linear size increase for three');
+    return $increment;
+}
+
+{
+    my $small = shared_hash_keys(Perl => 'Rules');
+    my $big = shared_hash_keys('x' x 1024, '');
+ SKIP: {
+	skip("[keys %h] doesn't copy as shared hash key scalars prior to 5.10.0",
+	     1) if $] < 5.010;
+	is ($small, $big, 'The "shared" part of shared hash keys is spotted');
+    }
+}
+
+{
+    use vars '%DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG';
+    my $hash_size = total_size(\%DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG);
+    cmp_ok($hash_size, '>', 0, 'Hash size is sane');
+    my $stash_size
+	= total_size(\%DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG::);
+    cmp_ok($stash_size, '>',
+	   $hash_size + length 'DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG_DANG',
+	   'Stash size is larger than hash size plus length of the name');
+}
+
+{
+    my %h = (Perl => 'Rules');
+    my $hash_size = total_size(\%h);
+    cmp_ok($hash_size, '>', 0, 'Hash size is sane');
+    my $a = keys %h;
+    if ($] < 5.010) {
+	is(total_size(\%h), $hash_size,
+	   "Creating iteration state doesn't need to allocate storage");
+	# because all hashes carry the overhead of this storage from creation
+    } else {
+	cmp_ok(total_size(\%h), '>', $hash_size,
+	       'Creating iteration state allocates storage');
+    }
 }
